@@ -8,6 +8,14 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 特性 002 三类测试：`tests/tdd_contracts.rs`（10 个公开入口的行为契约与 TDD-PROBE 红绿表）、
+  `tests/sdd_spec.rs`（`docs/标准.md` 五章节 1:1 对照断言）、
+  `tests/aidd_boundary.rs`（7 条对抗 / 边界用例，含并发序号守恒与文件 fail-closed）。
+- `docs/标准.md`（定位 / 数据模型 / 追加语义 / 完整性 / 验收条款）与
+  `docs/API.md`（公开面清单与最小示例）。
+
 ## [0.1.0] - 2026-09-21
 
 ### 新增
