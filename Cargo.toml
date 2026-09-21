@@ -30,6 +30,11 @@ thiserror = "2"
 [dev-dependencies]
 tempfile = "3"
 
+# benches/hot_path.rs 自带 fn main()，必须关掉 libtest harness 才会真正执行。
+[[bench]]
+name = "hot_path"
+harness = false
+
 [lints.rust]
 private_interfaces = "deny"
 private_bounds = "deny"
