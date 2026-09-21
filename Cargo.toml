@@ -1,0 +1,47 @@
+[package]
+name = "evidence"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.71"
+description = "审计证据追加面：领域无关的结构化 provenance、幂等 receipt 绑定与本地 durable 文件存储"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bytechainx/evidence"
+homepage = "https://github.com/bytechainx/evidence"
+documentation = "https://docs.rs/evidence"
+readme = "README.md"
+keywords = ["audit", "evidence", "provenance", "persistence", "sha256"]
+categories = ["filesystem", "cryptography"]
+include = [
+    "src/**/*",
+    "tests/**/*",
+    "benches/**/*",
+    "examples/**/*",
+    "docs/**/*",
+    "README.md",
+    "LICENSE-*",
+    "Cargo.toml",
+]
+
+[dependencies]
+async-trait = "0.1"
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+private_interfaces = "deny"
+private_bounds = "deny"
+unused_must_use = "warn"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
