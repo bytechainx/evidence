@@ -1,0 +1,1 @@
+1	evidence-record/v1|regime_decision|fixture-analytics-20260801|snapshot-abc|fred-fixture-20260726|e707f0cffadc8c89f21c3097e0b4a92062b13945194a09992d02161f95b06d8f|accepted	evidence-binding/v1|0000000000000000000000000000000000000001|development|7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069

@@ -1,0 +1,2 @@
+1	evidence-record/v1|regime_decision|fixture-analytics-20260801|snapshot-abc|fred-fixture-20260726|e707f0cffadc8c89f21c3097e0b4a92062b13945194a09992d02161f95b06d8f|accepted
+2	evidence-record/v1|regime_decision|fixture-analytics-20260801|snapshot-def|fred-fixture-20260726,market-fixture-20260726|6b8a34c7154930a0435c0f26b6360ed4989cc3c0229b22f2e9c9ed3ce93cb954|rejected
