@@ -7,7 +7,7 @@ description = "审计证据追加面：领域无关的结构化 provenance、幂
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/bytechainx/evidence"
 homepage = "https://github.com/bytechainx/evidence"
-documentation = "https://docs.rs/evidence"
+documentation = "https://github.com/bytechainx/evidence#readme"
 readme = "README.md"
 keywords = ["audit", "evidence", "provenance", "persistence", "sha256"]
 categories = ["filesystem", "cryptography"]
@@ -42,6 +42,3 @@ panic = "deny"
 unreachable = "deny"
 todo = "deny"
 unimplemented = "deny"
-
-[package.metadata.docs.rs]
-rustdoc-args = ["--cfg", "docsrs"]
