@@ -664,6 +664,20 @@ pub(crate) fn idempotent_lookup<'a>(
 }
 
 /// 对任意 payload 计算小写 SHA-256 文本摘要。
+///
+/// # Examples
+///
+/// ```
+/// use evidence::sha256_hex;
+///
+/// // FIPS 180-4 标准向量：SHA-256("abc")
+/// let digest = sha256_hex(b"abc");
+/// assert_eq!(
+///     digest,
+///     "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+/// );
+/// assert_eq!(digest.len(), 64, "十六进制小写，定长 64 字符");
+/// ```
 #[must_use]
 pub fn sha256_hex(payload: impl AsRef<[u8]>) -> String {
     let mut hasher = Sha256::new();
