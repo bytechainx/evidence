@@ -37,6 +37,12 @@ test-signing-key = []
 
 [dev-dependencies]
 tempfile = "3"
+# 本仓自身的集成测试（tests/tdd_contracts.rs、aidd_boundary.rs、query_sign.rs、sdd_spec.rs）
+# 需要 `TestSigningKey` 与 `ImmutableBinding::sign`，而二者按
+# `cfg(any(test, feature = "test-signing-key"))` 门控——集成测试目标下 lib 不带 `cfg(test)`，
+# 故用「自 dev-dependency」在这些测试目标上启用 `test-signing-key`。
+# dev-dependencies 不参与 `cargo build` / 发布产物，生产侧的防泄露门控意图不变。
+evidence = { path = ".", features = ["test-signing-key"] }
 
 # benches/hot_path.rs 自带 fn main()，必须关掉 libtest harness 才会真正执行。
 [[bench]]
