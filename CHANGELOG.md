@@ -20,6 +20,18 @@
 - `EvidenceError` 标记 `#[non_exhaustive]`：下游穷举 match 需加通配臂，新增变体不再视为 PATCH 兼容。
 - `FileProcessLock` 与 `pid_is_alive` 文档补充非 Linux 平台陈旧锁手动清理流程说明。
 
+## [0.1.2] - 2026-09-23
+
+### 变更
+
+- **内部结构改写（公开 API 与可观察契约均不变）**：按 `docs/module-rules.md` §5.5 的手法，
+  把文件身份与跨进程 writer 锁从 `src/file.rs` 下沉为子模块 `src/file/lock.rs`
+  （`FileProcessLock` 及其 `path_for` / `acquire`、`pid_is_alive`、`try_recover_stale_lock`、
+  `FileIdentity` / `file_identity`）。门面 `src/file.rs` 保留 store / 流式迭代器 / 分页读取、
+  同进程 active-file 去重与**原有内联 `#[cfg(test)]` 测试段**（保持不变）。
+  下沉项以 `pub(super)` 转出，**公开路径与 crate 内部路径均不变**；
+  `src/file.rs` 生产段 619 → 456 行，消除元仓库 `MR-STRUCT-007` 提示。
+
 ## [0.1.1] - 2026-09-22
 
 ### 新增
