@@ -17,7 +17,11 @@ L1 审计证据追加面：领域无关的结构化 provenance（`EvidenceRecord
 
 ```text
 src/
-├── lib.rs      # 核心面：EvidenceRecord / AppendReceipt / EvidenceStore trait / AsyncEvidenceStore / MemoryEvidenceStore / FileEvidenceStore / sha256_hex
+├── lib.rs      # 核心面：EvidenceRecord / ReceiptBinding / AppendReceipt / 可判定 outcome 与持久性能力、
+│               # EvidenceStore 与 AsyncEvidenceStore 两个 seam、idempotent_lookup
+├── memory.rs   # 进程内实现：MemoryEvidenceStore（仅开发与确定性测试）
+├── wire.rs     # 行协议编解码 / 字段校验 / 摘要原语：parse_line、receipt_line、sha256_hex、validate_*
+├── file.rs     # 本地行协议持久化：FileEvidenceStore（文件 I/O、跨进程 writer 锁、active-file 去重）
 ├── binding.rs  # B1 receipt 绑定：ReceiptBinding 校验、ImmutableBinding、verify_binding
 ├── lineage.rs  # 组合溯源：LineageBinding、DecisionComposition、verify_lineage / verify_composition
 ├── query.rs    # 读取面：EvidenceReader

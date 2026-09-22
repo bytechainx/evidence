@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-22
+
 ### 新增
 
 - 特性 002 三类测试：`tests/tdd_contracts.rs`（10 个公开入口的行为契约与 TDD-PROBE 红绿表）、
@@ -15,6 +17,19 @@
   `tests/aidd_boundary.rs`（7 条对抗 / 边界用例，含并发序号守恒与文件 fail-closed）。
 - `docs/标准.md`（定位 / 数据模型 / 追加语义 / 完整性 / 验收条款）与
   `docs/API.md`（公开面清单与最小示例）。
+
+### 变更
+
+- **内部结构改写（公开 API 与可观察契约均不变）**：按 `docs/module-rules.md` §5.5 的手法，把进程内
+  实现与行协议原语从 `src/lib.rs` 下沉为独立子模块 —— 内存 store → `src/memory.rs`、行协议编解码 /
+  字段校验 / 摘要原语 → `src/wire.rs`。门面 `src/lib.rs` 保留 crate 文档、`EvidenceError`、全部 DTO、
+  `EvidenceStore` / `AsyncEvidenceStore` 两个 seam 与 `idempotent_lookup`。
+  `MemoryEvidenceStore` / `parse_line` / `sha256_hex` 仍经 crate 根 `pub use` 导出，
+  `receipt_line` 与三个 `validate_*` 以 `pub(crate)` 转出，**公开路径与 crate 内部路径均不变**。
+  `src/lib.rs` 生产段由 **728 → 474** 行（`src/memory.rs` 149、`src/wire.rs` 134）。
+  动机：`module-rules` 是元仓库必需检查，且它审计各仓**默认分支**，故当 `lib.rs` 生产段距
+  `MR-STRUCT-007` 的 800 行 ERROR 阈值只剩 72 行时，任一仓的任意改动都可能卡住元仓库的全部 PR。
+  属**纯搬移**（行多重集比对确认零代码行丢失），全部 73 项测试与 doctest 结果不变。
 
 ## [0.1.0] - 2026-09-21
 

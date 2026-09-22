@@ -47,9 +47,7 @@
 #![deny(unreachable_pub)]
 
 use std::io;
-use std::sync::Mutex;
 
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// 当前结构化 Evidence 行记录的 wire schema。
@@ -117,17 +115,24 @@ pub enum EvidenceError {
 mod binding;
 mod file;
 mod lineage;
+mod memory;
 mod query;
 mod sign;
+mod wire;
 
 pub use binding::{verify_binding, ImmutableBinding, IMMUTABLE_BINDING_SCHEMA};
 pub use file::FileEvidenceStore;
 pub use lineage::{verify_composition, verify_lineage, DecisionComposition, LineageBinding};
+pub use memory::MemoryEvidenceStore;
 pub use query::EvidenceReader;
 pub use sign::{
     sign_canonical, verify_approval, verify_canonical, ProtectedSignature, SignatureRole,
     SigningKey, TestSigningKey,
 };
+pub use wire::{parse_line, sha256_hex};
+// 行协议的序列化与字段校验原语：`src/file.rs` 与其它模块按 `crate::<name>` 复用，
+// 故在此以 `pub(crate)` 转出，保持这些 crate 内部路径与拆分前一致。
+pub(crate) use wire::{receipt_line, validate_commit, validate_component, validate_digest};
 
 /// 一条与领域无关的决策证据。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -452,201 +457,6 @@ where
     }
 }
 
-/// 进程内 Evidence 实现，仅用于开发和确定性测试。
-#[derive(Debug, Default)]
-pub struct MemoryEvidenceStore {
-    state: Mutex<MemoryState>,
-}
-
-#[derive(Debug, Default)]
-struct MemoryState {
-    next_seq: u64,
-    entries: Vec<AppendReceipt>,
-    closed: bool,
-}
-
-impl MemoryEvidenceStore {
-    /// 创建空的内存 Evidence store。
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 返回当前追加快照。
-    pub fn entries(&self) -> Result<Vec<AppendReceipt>, EvidenceError> {
-        self.state
-            .lock()
-            .map(|state| state.entries.clone())
-            .map_err(|_| EvidenceError::LockPoisoned)
-    }
-
-    /// 关闭 store；用于验证 fail-closed 行为。
-    pub fn close(&self) -> Result<(), EvidenceError> {
-        self.state
-            .lock()
-            .map(|mut state| {
-                state.closed = true;
-            })
-            .map_err(|_| EvidenceError::LockPoisoned)
-    }
-}
-
-impl EvidenceStore for MemoryEvidenceStore {
-    fn append(&self, record: &EvidenceRecord) -> Result<AppendReceipt, EvidenceError> {
-        record.validate()?;
-        let mut state = self.state.lock().map_err(|_| EvidenceError::LockPoisoned)?;
-        if state.closed {
-            return Err(EvidenceError::Closed);
-        }
-        let seq = state
-            .next_seq
-            .checked_add(1)
-            .ok_or_else(|| EvidenceError::InvalidWire("追加序号溢出".into()))?;
-        let receipt = AppendReceipt {
-            seq,
-            record: record.clone(),
-            binding: None,
-        };
-        state.next_seq = seq;
-        state.entries.push(receipt.clone());
-        Ok(receipt)
-    }
-
-    fn append_idempotent(&self, record: &EvidenceRecord) -> Result<AppendReceipt, EvidenceError> {
-        record.validate()?;
-        let mut state = self.state.lock().map_err(|_| EvidenceError::LockPoisoned)?;
-        if state.closed {
-            return Err(EvidenceError::Closed);
-        }
-        if let Some(existing) = idempotent_lookup(&state.entries, record, None)? {
-            return Ok(existing.clone());
-        }
-        let seq = state
-            .next_seq
-            .checked_add(1)
-            .ok_or_else(|| EvidenceError::InvalidWire("追加序号溢出".into()))?;
-        let receipt = AppendReceipt {
-            seq,
-            record: record.clone(),
-            binding: None,
-        };
-        state.next_seq = seq;
-        state.entries.push(receipt.clone());
-        Ok(receipt)
-    }
-
-    fn append_with_binding(
-        &self,
-        record: &EvidenceRecord,
-        binding: &ReceiptBinding,
-    ) -> Result<AppendReceipt, EvidenceError> {
-        record.validate()?;
-        binding.validate()?;
-        let mut state = self.state.lock().map_err(|_| EvidenceError::LockPoisoned)?;
-        if state.closed {
-            return Err(EvidenceError::Closed);
-        }
-        let seq = state
-            .next_seq
-            .checked_add(1)
-            .ok_or_else(|| EvidenceError::InvalidWire("追加序号溢出".into()))?;
-        let receipt = AppendReceipt {
-            seq,
-            record: record.clone(),
-            binding: Some(binding.clone()),
-        };
-        state.next_seq = seq;
-        state.entries.push(receipt.clone());
-        Ok(receipt)
-    }
-
-    fn append_idempotent_with_binding(
-        &self,
-        record: &EvidenceRecord,
-        binding: &ReceiptBinding,
-    ) -> Result<AppendReceipt, EvidenceError> {
-        record.validate()?;
-        binding.validate()?;
-        let mut state = self.state.lock().map_err(|_| EvidenceError::LockPoisoned)?;
-        if state.closed {
-            return Err(EvidenceError::Closed);
-        }
-        if let Some(existing) = idempotent_lookup(&state.entries, record, Some(binding))? {
-            return Ok(existing.clone());
-        }
-        let seq = state
-            .next_seq
-            .checked_add(1)
-            .ok_or_else(|| EvidenceError::InvalidWire("追加序号溢出".into()))?;
-        let receipt = AppendReceipt {
-            seq,
-            record: record.clone(),
-            binding: Some(binding.clone()),
-        };
-        state.next_seq = seq;
-        state.entries.push(receipt.clone());
-        Ok(receipt)
-    }
-}
-
-/// 解析一条带追加序号的 Evidence 行。
-pub fn parse_line(line: &str) -> Result<AppendReceipt, EvidenceError> {
-    let mut parts = line.splitn(3, '\t');
-    let seq = parts
-        .next()
-        .ok_or_else(|| EvidenceError::InvalidWire("缺少序号".into()))?
-        .parse::<u64>()
-        .map_err(|error| EvidenceError::InvalidWire(format!("序号不是数字：{error}")))?;
-    if seq == 0 {
-        return Err(EvidenceError::InvalidWire("序号必须从 1 开始".into()));
-    }
-    let record_payload = parts
-        .next()
-        .ok_or_else(|| EvidenceError::InvalidWire("缺少 record payload".into()))?;
-    let binding = parts.next().map(parse_binding).transpose()?;
-    let record = parse_record_payload(record_payload)?;
-    Ok(AppendReceipt {
-        seq,
-        record,
-        binding,
-    })
-}
-
-fn parse_record_payload(payload: &str) -> Result<EvidenceRecord, EvidenceError> {
-    let fields: Vec<&str> = payload.split('|').collect();
-    if fields.len() != 7 || fields[0] != RECORD_SCHEMA {
-        return Err(EvidenceError::InvalidWire(
-            "record schema 或字段数不匹配".into(),
-        ));
-    }
-    let batch_ids = fields[4].split(',').map(str::to_owned).collect();
-    EvidenceRecord::new(
-        fields[1], fields[2], fields[3], batch_ids, fields[5], fields[6],
-    )
-}
-
-fn parse_binding(payload: &str) -> Result<ReceiptBinding, EvidenceError> {
-    let fields: Vec<&str> = payload.split('|').collect();
-    if fields.len() != 4 || fields[0] != BINDING_SCHEMA {
-        return Err(EvidenceError::InvalidWire(
-            "binding schema 或字段数不匹配".into(),
-        ));
-    }
-    ReceiptBinding::new(fields[1], fields[2], fields[3])
-}
-
-pub(crate) fn receipt_line(
-    seq: u64,
-    record: &EvidenceRecord,
-    binding: Option<&ReceiptBinding>,
-) -> String {
-    let record_line = record.canonical_line();
-    match binding {
-        Some(binding) => format!("{seq}\t{record_line}\t{}\n", binding.canonical_line()),
-        None => format!("{seq}\t{record_line}\n"),
-    }
-}
-
 pub(crate) fn idempotent_lookup<'a>(
     entries: &'a [AppendReceipt],
     record: &EvidenceRecord,
@@ -661,68 +471,4 @@ pub(crate) fn idempotent_lookup<'a>(
         }
     }
     Ok(Some(existing))
-}
-
-/// 对任意 payload 计算小写 SHA-256 文本摘要。
-///
-/// # Examples
-///
-/// ```
-/// use evidence::sha256_hex;
-///
-/// // FIPS 180-4 标准向量：SHA-256("abc")
-/// let digest = sha256_hex(b"abc");
-/// assert_eq!(
-///     digest,
-///     "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-/// );
-/// assert_eq!(digest.len(), 64, "十六进制小写，定长 64 字符");
-/// ```
-#[must_use]
-pub fn sha256_hex(payload: impl AsRef<[u8]>) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(payload.as_ref());
-    encode_hex(&hasher.finalize())
-}
-
-fn validate_component(
-    field: &'static str,
-    value: &str,
-    comma_reserved: bool,
-) -> Result<(), EvidenceError> {
-    if value.is_empty() {
-        return Err(EvidenceError::EmptyField(field));
-    }
-    if value
-        .chars()
-        .any(|character| matches!(character, '|' | '\t' | '\r' | '\n'))
-        || (comma_reserved && value.contains(','))
-    {
-        return Err(EvidenceError::InvalidCharacter(field));
-    }
-    Ok(())
-}
-
-fn validate_digest(field: &'static str, value: &str) -> Result<(), EvidenceError> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(EvidenceError::InvalidDigest(field));
-    }
-    Ok(())
-}
-
-fn validate_commit(field: &'static str, value: &str) -> Result<(), EvidenceError> {
-    if value.len() != 40 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(EvidenceError::InvalidDigest(field));
-    }
-    Ok(())
-}
-
-fn encode_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
 }
