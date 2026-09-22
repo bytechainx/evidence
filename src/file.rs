@@ -24,6 +24,8 @@ pub struct FileEvidenceStore {
     path: PathBuf,
     identity: FileIdentity,
     _process_lock: FileProcessLock,
+    /// open() 时是否因尾行半写损坏而截断恢复。
+    truncated_on_open: bool,
     state: Mutex<FileState>,
 }
 
@@ -204,21 +206,40 @@ impl FileEvidenceStore {
             pause();
         }
         let text = std::fs::read_to_string(&path).map_err(EvidenceError::Durability)?;
+        let lines: Vec<&str> = text.lines().collect();
         let mut entries = Vec::new();
         let mut last_seq = 0;
-        for line in text.lines() {
-            let receipt = parse_line(line)?;
-            if receipt.seq <= last_seq {
-                return Err(EvidenceError::InvalidWire("追加序号不是严格递增".into()));
+        let mut truncated_on_open = false;
+        for (i, line) in lines.iter().enumerate() {
+            match parse_line(line) {
+                Ok(receipt) => {
+                    if receipt.seq <= last_seq {
+                        return Err(EvidenceError::InvalidWire(
+                            "追加序号不是严格递增".into(),
+                        ));
+                    }
+                    last_seq = receipt.seq;
+                    entries.push(receipt);
+                }
+                Err(_) if i == lines.len() - 1 && !entries.is_empty() => {
+                    // 尾行半写损坏：计算最后完整行结尾的字节偏移，截断文件后继续启动。
+                    let truncate_at: u64 = lines[..i]
+                        .iter()
+                        .map(|l| (l.len() + 1) as u64) // +1 for '\n'
+                        .sum();
+                    file.set_len(truncate_at).map_err(EvidenceError::Durability)?;
+                    truncated_on_open = true;
+                    break;
+                }
+                Err(e) => return Err(e),
             }
-            last_seq = receipt.seq;
-            entries.push(receipt);
         }
         active_guard.disarm();
         Ok(Self {
             path,
             identity,
             _process_lock: process_lock,
+            truncated_on_open,
             state: Mutex::new(FileState {
                 file,
                 next_seq: last_seq,
@@ -231,6 +252,16 @@ impl FileEvidenceStore {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// open() 时是否因尾行半写损坏而截断恢复。
+    ///
+    /// 返回 `true` 表示上次写入在追加过程中断电/崩溃，导致最后一行不完整；
+    /// open() 已将文件截断至最后一个完整行，此前缀数据完整可用。
+    /// 调用方可据此记录 warning 或触发运维检查。
+    #[must_use]
+    pub fn was_truncated_on_open(&self) -> bool {
+        self.truncated_on_open
     }
 
     /// 返回已经校验过的追加快照。
@@ -558,5 +589,106 @@ mod tests {
         let lock_path = FileProcessLock::path_for(&canonical, &identity);
         assert!(lock_path.is_file(), "异常退出后的锁必须保持 fail-closed");
         std::fs::remove_file(lock_path).expect("controlled stale lock cleanup");
+    }
+
+    #[test]
+    fn open_recovers_from_truncated_last_line() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("truncated.log");
+        // 先写入两条完整记录
+        {
+            let store = FileEvidenceStore::open(&path).expect("open");
+            store
+                .append(&record("snapshot-1"))
+                .expect("append 1");
+            store
+                .append(&record("snapshot-2"))
+                .expect("append 2");
+        }
+        // 模拟尾行半写：追加一行不完整的内容
+        {
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open for corruption");
+            // 半行：缺少末尾字段，不含换行
+            use std::io::Write;
+            file.write_all(b"3\tevidence-record/v1|corrupt|v1|s|batch|digest|")
+                .expect("write corrupt");
+            file.flush().expect("flush");
+            file.sync_all().expect("sync");
+        }
+        // 清理锁文件使 reopen 可行
+        {
+            let file = OpenOptions::new()
+                .read(true)
+                .open(&path)
+                .expect("open for identity");
+            let canonical = path.canonicalize().expect("canonical path");
+            let identity = file_identity(&file, &canonical).expect("file identity");
+            let lock_path = FileProcessLock::path_for(&canonical, &identity);
+            if lock_path.exists() {
+                std::fs::remove_file(&lock_path).expect("clean lock");
+            }
+        }
+        // 重新打开：应成功，且标记截断
+        let store = FileEvidenceStore::open(&path).expect("reopen after truncation");
+        assert!(
+            store.was_truncated_on_open(),
+            "应检测到尾行半写并截断恢复"
+        );
+        let entries = store.entries().expect("entries");
+        assert_eq!(entries.len(), 2, "两条完整记录应保留");
+        assert_eq!(entries[0].seq, 1);
+        assert_eq!(entries[1].seq, 2);
+    }
+
+    #[test]
+    fn open_rejects_corrupt_non_last_line() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("mid-corrupt.log");
+        // 写入一条完整记录
+        {
+            let store = FileEvidenceStore::open(&path).expect("open");
+            store
+                .append(&record("snapshot-1"))
+                .expect("append 1");
+        }
+        // 手动重写文件：第 1 行有效 → 第 2 行损坏（非尾行） → 第 3 行也是损坏行
+        // 第 2 行（i=1）不是最后一行（总行数=3），应触发硬错误而非截断。
+        let original = std::fs::read_to_string(&path).expect("read");
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&path)
+                .expect("open for rewrite");
+            use std::io::Write;
+            file.write_all(original.as_bytes()).expect("write line 1");
+            // 损坏的中间行：字段数不足
+            file.write_all(b"2\tbroken\n").expect("write corrupt mid");
+            // 第三行使第二行成为真正的"中间行"
+            file.write_all(b"3\talso_broken\n").expect("write trailing");
+            file.flush().expect("flush");
+            file.sync_all().expect("sync");
+        }
+        // 清理锁
+        {
+            let file = OpenOptions::new()
+                .read(true)
+                .open(&path)
+                .expect("open for identity");
+            let canonical = path.canonicalize().expect("canonical path");
+            let identity = file_identity(&file, &canonical).expect("file identity");
+            let lock_path = FileProcessLock::path_for(&canonical, &identity);
+            if lock_path.exists() {
+                std::fs::remove_file(&lock_path).expect("clean lock");
+            }
+        }
+        // 重新打开：非尾行损坏应拒绝（第 2 行损坏但第 3 行存在）
+        assert!(
+            FileEvidenceStore::open(&path).is_err(),
+            "非尾行损坏应拒绝打开"
+        );
     }
 }
