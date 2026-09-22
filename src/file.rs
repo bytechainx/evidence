@@ -129,7 +129,9 @@ fn try_recover_stale_lock(lock_path: &Path) -> Result<(), EvidenceError> {
         .strip_prefix("pid=")
         .and_then(|rest| rest.lines().next())
         .unwrap_or("");
-    let pid: u32 = pid_str.parse().map_err(|_| EvidenceError::PathAlreadyOpen)?;
+    let pid: u32 = pid_str
+        .parse()
+        .map_err(|_| EvidenceError::PathAlreadyOpen)?;
     if pid == 0 {
         return Err(EvidenceError::PathAlreadyOpen);
     }
@@ -265,9 +267,7 @@ impl FileEvidenceStore {
             match parse_line(line) {
                 Ok(receipt) => {
                     if receipt.seq <= last_seq {
-                        return Err(EvidenceError::InvalidWire(
-                            "追加序号不是严格递增".into(),
-                        ));
+                        return Err(EvidenceError::InvalidWire("追加序号不是严格递增".into()));
                     }
                     last_seq = receipt.seq;
                     entries.push(receipt);
@@ -278,7 +278,8 @@ impl FileEvidenceStore {
                         .iter()
                         .map(|l| (l.len() + 1) as u64) // +1 for '\n'
                         .sum();
-                    file.set_len(truncate_at).map_err(EvidenceError::Durability)?;
+                    file.set_len(truncate_at)
+                        .map_err(EvidenceError::Durability)?;
                     truncated_on_open = true;
                     break;
                 }
@@ -316,10 +317,41 @@ impl FileEvidenceStore {
     }
 
     /// 返回已经校验过的追加快照。
+    ///
+    /// 每次调用都会全量 clone 内部 `Vec`；对于条目数很大的审计文件，建议改用
+    /// [`EvidenceReader`](crate::EvidenceReader) 的 `len`/`get`/`find_by_record`
+    /// 方法，这些方法不执行全量 clone。
     pub fn entries(&self) -> Result<Vec<AppendReceipt>, EvidenceError> {
         self.state
             .lock()
             .map(|state| state.entries.clone())
+            .map_err(|_| EvidenceError::LockPoisoned)
+    }
+
+    /// 返回已校验条目数量（不执行全量 clone）。
+    pub fn entry_count(&self) -> Result<usize, EvidenceError> {
+        self.state
+            .lock()
+            .map(|state| state.entries.len())
+            .map_err(|_| EvidenceError::LockPoisoned)
+    }
+
+    /// 按序号检索单条回执（不执行全量 clone）。
+    pub(crate) fn get_entry(&self, seq: u64) -> Result<Option<AppendReceipt>, EvidenceError> {
+        self.state
+            .lock()
+            .map(|state| state.entries.iter().find(|e| e.seq == seq).cloned())
+            .map_err(|_| EvidenceError::LockPoisoned)
+    }
+
+    /// 按规范化记录检索首条匹配回执（不执行全量 clone）。
+    pub(crate) fn find_entry(
+        &self,
+        record: &crate::EvidenceRecord,
+    ) -> Result<Option<AppendReceipt>, EvidenceError> {
+        self.state
+            .lock()
+            .map(|state| state.entries.iter().find(|e| e.record == *record).cloned())
             .map_err(|_| EvidenceError::LockPoisoned)
     }
 }
@@ -711,12 +743,8 @@ mod tests {
         // 先写入两条完整记录
         {
             let store = FileEvidenceStore::open(&path).expect("open");
-            store
-                .append(&record("snapshot-1"))
-                .expect("append 1");
-            store
-                .append(&record("snapshot-2"))
-                .expect("append 2");
+            store.append(&record("snapshot-1")).expect("append 1");
+            store.append(&record("snapshot-2")).expect("append 2");
         }
         // 模拟尾行半写：追加一行不完整的内容
         {
@@ -746,10 +774,7 @@ mod tests {
         }
         // 重新打开：应成功，且标记截断
         let store = FileEvidenceStore::open(&path).expect("reopen after truncation");
-        assert!(
-            store.was_truncated_on_open(),
-            "应检测到尾行半写并截断恢复"
-        );
+        assert!(store.was_truncated_on_open(), "应检测到尾行半写并截断恢复");
         let entries = store.entries().expect("entries");
         assert_eq!(entries.len(), 2, "两条完整记录应保留");
         assert_eq!(entries[0].seq, 1);
@@ -763,9 +788,7 @@ mod tests {
         // 写入一条完整记录
         {
             let store = FileEvidenceStore::open(&path).expect("open");
-            store
-                .append(&record("snapshot-1"))
-                .expect("append 1");
+            store.append(&record("snapshot-1")).expect("append 1");
         }
         // 手动重写文件：第 1 行有效 → 第 2 行损坏（非尾行） → 第 3 行也是损坏行
         // 第 2 行（i=1）不是最后一行（总行数=3），应触发硬错误而非截断。
