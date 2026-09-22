@@ -18,9 +18,14 @@ pub trait SigningKey: Send + Sync {
 }
 
 /// 测试专用密钥（确定性 sha256 test scheme）；**禁止用于生产**。
+///
+/// 仅在 `#[cfg(test)]` 或启用 `test-signing-key` feature 时编译。
+/// 生产构建中不可用，防止 `strings` 等工具从发布二进制提取硬编码密钥。
 #[derive(Clone, Copy, Default)]
+#[cfg(any(test, feature = "test-signing-key"))]
 pub struct TestSigningKey;
 
+#[cfg(any(test, feature = "test-signing-key"))]
 impl SigningKey for TestSigningKey {
     fn key_material(&self) -> &[u8] {
         b"bytechainx-evidence-test-signing-key-v1-NOT-FOR-PRODUCTION"

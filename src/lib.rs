@@ -120,15 +120,19 @@ mod query;
 mod sign;
 mod wire;
 
-pub use binding::{verify_binding, ImmutableBinding, IMMUTABLE_BINDING_SCHEMA};
+pub use binding::{ImmutableBinding, IMMUTABLE_BINDING_SCHEMA};
+#[cfg(any(test, feature = "test-signing-key"))]
+pub use binding::verify_binding;
 pub use file::FileEvidenceStore;
 pub use lineage::{verify_composition, verify_lineage, DecisionComposition, LineageBinding};
 pub use memory::MemoryEvidenceStore;
 pub use query::EvidenceReader;
 pub use sign::{
     sign_canonical, verify_approval, verify_canonical, ProtectedSignature, SignatureRole,
-    SigningKey, TestSigningKey,
+    SigningKey,
 };
+#[cfg(any(test, feature = "test-signing-key"))]
+pub use sign::TestSigningKey;
 pub use wire::{parse_line, sha256_hex};
 // 行协议的序列化与字段校验原语：`src/file.rs` 与其它模块按 `crate::<name>` 复用，
 // 故在此以 `pub(crate)` 转出，保持这些 crate 内部路径与拆分前一致。
