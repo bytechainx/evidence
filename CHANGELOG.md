@@ -8,6 +8,18 @@
 
 ## [Unreleased]
 
+### 新增
+
+- `FileEvidenceIter`：流式证据文件条目迭代器，逐行解析行协议文件而不一次性加载全量到内存。
+  适合长期运行审计容器在内存受限场景下对大审计文件做分页查询。
+- `read_entries_page(path, offset, limit)`：按分页读取文件条目，跳过 `offset` 条后取最多 `limit` 条。
+- 回归测试 5 项：全量迭代正确性、与 `entries()` 结果一致性、分页边界、空文件、解析计数。
+
+### 变更
+
+- `EvidenceError` 标记 `#[non_exhaustive]`：下游穷举 match 需加通配臂，新增变体不再视为 PATCH 兼容。
+- `FileProcessLock` 与 `pid_is_alive` 文档补充非 Linux 平台陈旧锁手动清理流程说明。
+
 ## [0.1.1] - 2026-09-22
 
 ### 新增

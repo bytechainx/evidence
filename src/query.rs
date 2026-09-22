@@ -46,20 +46,17 @@ impl EvidenceReader for MemoryEvidenceStore {
 
 impl EvidenceReader for FileEvidenceStore {
     fn len(&self) -> Result<usize, EvidenceError> {
-        Ok(self.entries()?.len())
+        self.entry_count()
     }
 
     fn get(&self, seq: u64) -> Result<Option<AppendReceipt>, EvidenceError> {
-        Ok(self.entries()?.into_iter().find(|entry| entry.seq == seq))
+        self.get_entry(seq)
     }
 
     fn find_by_record(
         &self,
         record: &EvidenceRecord,
     ) -> Result<Option<AppendReceipt>, EvidenceError> {
-        Ok(self
-            .entries()?
-            .into_iter()
-            .find(|entry| entry.record == *record))
+        self.find_entry(record)
     }
 }

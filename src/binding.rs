@@ -4,9 +4,10 @@
 //! （B2 `sign_canonical` 产物）。字段私有 + 签名覆盖 canonical 内容，实现
 //! 不可变：篡改任一字段或签名均使 [`ImmutableBinding::verify`] 失败。
 
-use crate::sign::{
-    sign_canonical, verify_canonical, ProtectedSignature, SignatureRole, TestSigningKey,
-};
+use crate::sign::ProtectedSignature;
+#[cfg(any(test, feature = "test-signing-key"))]
+use crate::sign::{sign_canonical, verify_canonical, SignatureRole, TestSigningKey};
+#[cfg(any(test, feature = "test-signing-key"))]
 use crate::{validate_commit, validate_component, validate_digest, EvidenceError};
 
 /// B3 不可变 binding 的行协议 schema 标识。
@@ -27,6 +28,9 @@ pub struct ImmutableBinding {
 
 impl ImmutableBinding {
     /// 创建并签名：Owner 签名覆盖 canonical 内容。
+    ///
+    /// 仅在 `#[cfg(test)]` 或启用 `test-signing-key` feature 时可用。
+    #[cfg(any(test, feature = "test-signing-key"))]
     pub fn sign(
         owner_id: impl Into<String>,
         source_commit: impl Into<String>,
@@ -67,6 +71,9 @@ impl ImmutableBinding {
     }
 
     /// 独立验证：签名与摘要一致性。篡改任一字段或签名均失败。
+    ///
+    /// 仅在 `#[cfg(test)]` 或启用 `test-signing-key` feature 时可用。
+    #[cfg(any(test, feature = "test-signing-key"))]
     pub fn verify(&self) -> Result<(), EvidenceError> {
         let payload = self.canonical_bytes();
         verify_canonical(&TestSigningKey, &self.owner_signature, &payload)
@@ -116,6 +123,9 @@ impl ImmutableBinding {
 }
 
 /// 独立 verifier（B3 语义：非 Agent 自报，独立验证 binding 签名与摘要）。
+///
+/// 仅在 `#[cfg(test)]` 或启用 `test-signing-key` feature 时可用。
+#[cfg(any(test, feature = "test-signing-key"))]
 pub fn verify_binding(binding: &ImmutableBinding) -> Result<(), EvidenceError> {
     binding.verify()
 }

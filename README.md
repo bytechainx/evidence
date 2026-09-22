@@ -79,6 +79,19 @@ fn main() -> evidence::EvidenceResult<()> {
 - 进程异常退出后**不**擅自判断锁是否过期，残留锁保持 fail-closed，必须由受控运维流程清理
 - 它只保证同一受控文件系统上协作进程的互斥，**不**提供跨主机 / NFS 锁语义
 
+### 陈旧锁清理
+
+进程异常退出后，sidecar 锁文件可能残留。**Linux 下**，`FileEvidenceStore::open()` 会通过
+`/proc/<pid>` 自动检测并恢复陈旧锁。**非 Linux 平台**（macOS、Windows 等）不执行自动恢复，
+残留锁保持 fail-closed，须由运维人员手动清理：
+
+1. 确认锁文件中记录的 PID 已不在运行
+2. 确认无其他活跃 writer 正在写入同一 evidence 文件
+3. 删除锁文件（路径规则见 `FileProcessLock` 文档）
+4. 重新尝试 `open()`，不再返回 `PathAlreadyOpen` 即成功
+
+**警告**：跳过步骤 1 和 2 直接删锁，将导致双写，破坏 evidence 文件完整性。
+
 ## 非目标
 
 本 crate 不是独立 verifier、签名链、备份恢复系统或合规审计产品；远程数据库实现由
