@@ -34,6 +34,26 @@ pub struct FileEvidenceStore {
 /// 锁文件通过 `create_new` 原子创建。进程异常退出后不会擅自判断锁是否
 /// 过期；残留锁必须由受控运维流程清理，避免两个进程同时写入同一 Evidence
 /// 文件。它只提供本地文件互斥，不等价于远程存储的高可用或生产信任锚。
+///
+/// # 陈旧锁手动清理（非 Linux 平台）
+///
+/// Linux 下本模块通过 `/proc/<pid>` 检测持有者是否存活并自动恢复陈旧锁。
+/// **非 Linux 平台（macOS、Windows 等）不执行自动恢复**（保守策略），
+/// 残留锁保持 fail-closed。若进程异常退出后残留锁文件，运维人员需按以下
+/// 步骤手动清理：
+///
+/// 1. **确认持有者是否存活**：通过系统任务管理器或 `ps` 等价命令确认锁
+///    文件中记录的 PID 不再运行。
+/// 2. **确认无活跃 writer**：检查是否有其他进程正在写入同一 evidence 文件。
+/// 3. **手动删除锁文件**：锁文件路径规则如下——
+///    - Unix：`/run/user/<uid>/bytechainx-evidence-lock-<device>-<inode>`
+///      （回退 `/var/run/user/<uid>/`，再回退 `/tmp`）
+///    - 非 Unix：`<evidence-file-path>.evidence-writer-lock`
+/// 4. **删除后验证**：尝试重新 `open()` evidence 文件，确认不再返回
+///    `PathAlreadyOpen` 错误。
+///
+/// **警告**：在确认步骤 1 和 2 之前删除锁文件，**将导致双写，破坏
+/// evidence 文件完整性**。
 struct FileProcessLock {
     path: Option<PathBuf>,
     _file: File,
@@ -105,7 +125,8 @@ impl FileProcessLock {
 /// 检测 PID 是否存活。
 ///
 /// Linux 下通过 `/proc/<pid>` 检测；非 Linux 平台保守返回 `true`，
-/// 避免误判陈旧锁导致双写。
+/// 避免误判陈旧锁导致双写。非 Linux 平台的陈旧锁需手动清理，
+/// 详见 [`FileProcessLock`] 文档中的"陈旧锁手动清理"章节。
 fn pid_is_alive(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -221,6 +242,119 @@ struct FileState {
     file: File,
     next_seq: u64,
     entries: Vec<AppendReceipt>,
+}
+
+/// 流式 Evidence 文件条目迭代器。
+///
+/// 逐行解析行协议文件，不一次性加载全部条目到内存。
+/// 适合内存受限容器中大审计文件的分页查询场景。
+///
+/// # 使用示例
+///
+/// ```no_run
+/// use evidence::FileEvidenceIter;
+///
+/// fn main() -> evidence::EvidenceResult<()> {
+///     // 分页读取：跳过前 100 条，取 50 条
+///     let iter = FileEvidenceIter::open("large_audit.log")?;
+///     let page: Vec<_> = iter.skip(100).take(50).collect::<Result<Vec<_>, _>>()?;
+///     Ok(())
+/// }
+/// ```
+///
+/// # 与 FileEvidenceStore 的互斥
+///
+/// 本迭代器持有进程写锁；同一文件上不能同时存在
+/// [`FileEvidenceStore`] 与本迭代器。这是 fail-closed 语义的组成部分。
+pub struct FileEvidenceIter {
+    reader: std::io::BufReader<std::fs::File>,
+    _lock: FileProcessLock,
+    /// 已成功解析的行数（不含跳过和解析失败的行）。
+    parsed_count: u64,
+}
+
+impl FileEvidenceIter {
+    /// 以流式方式打开 Evidence 文件，获取进程锁后返回惰性条目迭代器。
+    ///
+    /// 每次 [`Iterator::next()`] 调用从文件中读取一行并解析为
+    /// [`AppendReceipt`]。到达文件末尾或遇到空行时返回 `None`。
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, crate::EvidenceError> {
+        let path = path.as_ref();
+        let canonical = std::fs::canonicalize(path).map_err(crate::EvidenceError::Durability)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(crate::EvidenceError::Durability)?;
+        let identity = file_identity(&file, &canonical)?;
+        let lock = FileProcessLock::acquire(&canonical, &identity)?;
+        Ok(Self {
+            reader: std::io::BufReader::new(file),
+            _lock: lock,
+            parsed_count: 0,
+        })
+    }
+
+    /// 返回已成功解析的条目数。
+    #[must_use]
+    pub fn parsed_count(&self) -> u64 {
+        self.parsed_count
+    }
+}
+
+impl Iterator for FileEvidenceIter {
+    type Item = Result<crate::AppendReceipt, crate::EvidenceError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        use std::io::BufRead;
+
+        let mut line = String::new();
+        match self.reader.read_line(&mut line) {
+            Ok(0) => None,
+            Ok(_) => {
+                let trimmed = line.trim_end_matches('\n');
+                // 空行视为文件末尾（文件尾可能有多余换行）
+                if trimmed.is_empty() {
+                    return None;
+                }
+                match crate::parse_line(trimmed) {
+                    Ok(receipt) => {
+                        self.parsed_count += 1;
+                        Some(Ok(receipt))
+                    }
+                    Err(e) => Some(Err(e)),
+                }
+            }
+            Err(e) => Some(Err(crate::EvidenceError::Durability(e))),
+        }
+    }
+}
+
+/// 从 evidence 文件中按分页读取条目。
+///
+/// 打开文件、获取进程锁，跳过 `offset` 条有效记录后取最多 `limit` 条。
+/// `offset` 为 0-based 索引（按已成功解析的条目计数，不含损坏行）。
+///
+/// # 与全量读取的一致性
+///
+/// 本函数与 [`FileEvidenceStore::open`] 使用相同的 [`parse_line`]
+/// 行解析逻辑；对同一完整文件调用本函数取 `offset=0` 与全量
+/// [`FileEvidenceStore::entries()`] 的结果在语义上一致。
+pub fn read_entries_page(
+    path: impl AsRef<Path>,
+    offset: u64,
+    limit: usize,
+) -> Result<Vec<crate::AppendReceipt>, crate::EvidenceError> {
+    let mut iter = FileEvidenceIter::open(path)?;
+    // 跳过 offset 条有效记录（解析失败的行不计入 offset）
+    let mut skipped: u64 = 0;
+    while skipped < offset {
+        match iter.next() {
+            Some(Ok(_)) => skipped += 1,
+            Some(Err(e)) => return Err(e),
+            None => return Ok(Vec::new()),
+        }
+    }
+    iter.take(limit).collect()
 }
 
 impl FileEvidenceStore {
@@ -826,5 +960,159 @@ mod tests {
             FileEvidenceStore::open(&path).is_err(),
             "非尾行损坏应拒绝打开"
         );
+    }
+
+    // ── 流式迭代器测试 ──
+
+    /// 创建写入 N 条记录的临时 evidence 文件，返回路径与已写入记录集合。
+    fn write_n_records(
+        directory: &tempfile::TempDir,
+        name: &str,
+        n: usize,
+    ) -> (std::path::PathBuf, Vec<crate::AppendReceipt>) {
+        let path = directory.path().join(name);
+        let store = FileEvidenceStore::open(&path).expect("创建临时文件");
+        let mut receipts = Vec::new();
+        for i in 0..n {
+            let snapshot = format!("snapshot-{i:04}");
+            let receipt = store.append(&record(&snapshot)).expect("追加记录");
+            receipts.push(receipt);
+        }
+        drop(store);
+        (path, receipts)
+    }
+
+    #[test]
+    fn stream_iter_reads_all_entries() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (path, expected) = write_n_records(&directory, "stream-all.log", 20);
+        // 清理锁文件使迭代器可获取锁
+        {
+            let file = OpenOptions::new().read(true).open(&path).expect("open");
+            let canonical = path.canonicalize().expect("canonical");
+            let identity = file_identity(&file, &canonical).expect("identity");
+            let lock_path = FileProcessLock::path_for(&canonical, &identity);
+            if lock_path.exists() {
+                std::fs::remove_file(&lock_path).expect("clean lock");
+            }
+        }
+        let iter = super::FileEvidenceIter::open(&path).expect("打开迭代器");
+        let got: Vec<_> = iter.collect::<Result<Vec<_>, _>>().expect("全部解析成功");
+        assert_eq!(
+            got.len(),
+            expected.len(),
+            "流式迭代器应读取全部 {0} 条记录",
+            expected.len()
+        );
+        assert_eq!(got, expected, "流式迭代器结果应与全量写入结果一致");
+    }
+
+    #[test]
+    fn stream_iter_matches_full_read() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (path, expected) = write_n_records(&directory, "consistency.log", 15);
+        // 清理锁
+        {
+            let file = OpenOptions::new().read(true).open(&path).expect("open");
+            let canonical = path.canonicalize().expect("canonical");
+            let identity = file_identity(&file, &canonical).expect("identity");
+            let lock_path = FileProcessLock::path_for(&canonical, &identity);
+            if lock_path.exists() {
+                std::fs::remove_file(&lock_path).expect("clean lock");
+            }
+        }
+        // 流式读取
+        let iter = super::FileEvidenceIter::open(&path).expect("打开迭代器");
+        let streamed: Vec<_> = iter.collect::<Result<Vec<_>, _>>().expect("流式解析");
+        // 全量读取（FileEvidenceStore::open 内部 read_to_string + 逐行 parse）
+        let store = FileEvidenceStore::open(&path).expect("全量打开");
+        let full = store.entries().expect("全量 entries");
+        assert_eq!(streamed, full, "流式读取应与全量 entries() 结果完全一致");
+        assert_eq!(streamed, expected, "流式读取应与写入结果完全一致");
+    }
+
+    #[test]
+    fn stream_iter_pagination_is_correct() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (path, expected) = write_n_records(&directory, "pagination.log", 30);
+        // 清理锁
+        {
+            let file = OpenOptions::new().read(true).open(&path).expect("open");
+            let canonical = path.canonicalize().expect("canonical");
+            let identity = file_identity(&file, &canonical).expect("identity");
+            let lock_path = FileProcessLock::path_for(&canonical, &identity);
+            if lock_path.exists() {
+                std::fs::remove_file(&lock_path).expect("clean lock");
+            }
+        }
+        // 分页：offset=5, limit=10
+        let page = super::read_entries_page(&path, 5, 10).expect("分页读取");
+        assert_eq!(page.len(), 10, "应返回恰好 10 条记录");
+        for (i, receipt) in page.iter().enumerate() {
+            let idx = 5 + i;
+            assert_eq!(receipt.seq, expected[idx].seq, "分页条目 [{i}] 序号不匹配");
+            assert_eq!(
+                receipt.record, expected[idx].record,
+                "分页条目 [{i}] 记录不匹配"
+            );
+        }
+        // 边界：offset 超出范围
+        let empty_page = super::read_entries_page(&path, 100, 10).expect("超出范围");
+        assert!(empty_page.is_empty(), "超出范围的分页应为空");
+        // 边界：limit 超过剩余条目
+        let partial = super::read_entries_page(&path, 25, 10).expect("部分页");
+        assert_eq!(partial.len(), 5, "超出末尾的页应返回剩余 5 条");
+    }
+
+    #[test]
+    fn stream_iter_empty_file_returns_none() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("empty.log");
+        // 创建空文件
+        {
+            let _store = FileEvidenceStore::open(&path).expect("创建空文件");
+        }
+        // 清理锁
+        {
+            let file = OpenOptions::new().read(true).open(&path).expect("open");
+            let canonical = path.canonicalize().expect("canonical");
+            let identity = file_identity(&file, &canonical).expect("identity");
+            let lock_path = FileProcessLock::path_for(&canonical, &identity);
+            if lock_path.exists() {
+                std::fs::remove_file(&lock_path).expect("clean lock");
+            }
+        }
+        let iter = super::FileEvidenceIter::open(&path).expect("打开迭代器");
+        let got: Vec<_> = iter.collect::<Result<Vec<_>, _>>().expect("解析");
+        assert!(got.is_empty(), "空文件应返回 0 条记录");
+    }
+
+    #[test]
+    fn stream_iter_parsed_count_is_accurate() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (path, _) = write_n_records(&directory, "count.log", 12);
+        // 清理锁
+        {
+            let file = OpenOptions::new().read(true).open(&path).expect("open");
+            let canonical = path.canonicalize().expect("canonical");
+            let identity = file_identity(&file, &canonical).expect("identity");
+            let lock_path = FileProcessLock::path_for(&canonical, &identity);
+            if lock_path.exists() {
+                std::fs::remove_file(&lock_path).expect("clean lock");
+            }
+        }
+        let mut iter = super::FileEvidenceIter::open(&path).expect("打开迭代器");
+        assert_eq!(iter.parsed_count(), 0, "初始已解析计数应为 0");
+        // 消费前 5 条
+        for _ in 0..5 {
+            assert!(iter.next().transpose().is_ok(), "前 5 条应解析成功");
+        }
+        let after_five = iter.parsed_count();
+        assert_eq!(after_five, 5, "解析 5 条后计数应为 5");
+        // 消费剩余
+        let rest: Vec<_> = iter.collect();
+        assert_eq!(rest.len(), 7, "剩余 7 条");
+        // 总计 = 手动消费的 5 + collect 到的 7
+        assert_eq!(after_five + rest.len() as u64, 12, "最终总计数应为 12");
     }
 }

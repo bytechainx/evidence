@@ -127,7 +127,7 @@ mod wire;
 #[cfg(any(test, feature = "test-signing-key"))]
 pub use binding::verify_binding;
 pub use binding::{ImmutableBinding, IMMUTABLE_BINDING_SCHEMA};
-pub use file::FileEvidenceStore;
+pub use file::{read_entries_page, FileEvidenceIter, FileEvidenceStore};
 pub use lineage::{verify_composition, verify_lineage, DecisionComposition, LineageBinding};
 pub use memory::MemoryEvidenceStore;
 pub use query::EvidenceReader;
