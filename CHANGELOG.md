@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### 变更
+
+- `EvidenceError` 标记 `#[non_exhaustive]`：下游穷举 match 需加通配臂，新增变体不再视为 PATCH 兼容。
+
 ## [0.1.1] - 2026-09-22
 
 ### 新增

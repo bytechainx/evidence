@@ -60,7 +60,11 @@ pub const BINDING_SCHEMA: &str = "evidence-binding/v1";
 pub type EvidenceResult<T> = Result<T, EvidenceError>;
 
 /// Evidence 追加错误。
+///
+/// 此枚举标记为 [`non_exhaustive`]：下游穷举 match 必须包含通配臂。
+/// 新增变体不再视为 PATCH 级兼容变更。
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum EvidenceError {
     /// 必填字段为空。
     #[error("证据记录字段为空：{0}")]
