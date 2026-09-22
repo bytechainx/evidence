@@ -69,26 +69,77 @@ impl FileProcessLock {
 
     fn acquire(path: &Path, identity: &FileIdentity) -> Result<Self, EvidenceError> {
         let lock_path = Self::path_for(path, identity);
-        let mut file = match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                return Err(EvidenceError::PathAlreadyOpen);
+        // 最多重试一次：第一次创建失败时若陈旧锁可恢复，清理后重试。
+        for attempt in 0..=1 {
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(mut file) => {
+                    let owner = format!("pid={}\n", std::process::id());
+                    file.write_all(owner.as_bytes())
+                        .map_err(EvidenceError::Durability)?;
+                    file.sync_all().map_err(EvidenceError::Durability)?;
+                    return Ok(Self {
+                        path: Some(lock_path),
+                        _file: file,
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    if attempt == 0 {
+                        // 尝试恢复陈旧锁
+                        if try_recover_stale_lock(&lock_path).is_ok() {
+                            continue; // 重试创建
+                        }
+                    }
+                    return Err(EvidenceError::PathAlreadyOpen);
+                }
+                Err(error) => return Err(EvidenceError::Durability(error)),
             }
-            Err(error) => return Err(EvidenceError::Durability(error)),
-        };
-        let owner = format!("pid={}\n", std::process::id());
-        file.write_all(owner.as_bytes())
-            .map_err(EvidenceError::Durability)?;
-        file.sync_all().map_err(EvidenceError::Durability)?;
-        Ok(Self {
-            path: Some(lock_path),
-            _file: file,
-        })
+        }
+        Err(EvidenceError::PathAlreadyOpen)
     }
+}
+
+/// 检测 PID 是否存活。
+///
+/// Linux 下通过 `/proc/<pid>` 检测；非 Linux 平台保守返回 `true`，
+/// 避免误判陈旧锁导致双写。
+fn pid_is_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let path = format!("/proc/{pid}");
+        std::fs::metadata(path).is_ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        true // 保守：非 Linux 平台不尝试恢复
+    }
+}
+
+/// 尝试恢复陈旧锁文件。
+///
+/// 读取锁文件中的 PID，若持有者已不存活则删除锁文件并返回 `Ok(())`；
+/// 若持有者存活或无法解析返回 `Err(EvidenceError::PathAlreadyOpen)`。
+fn try_recover_stale_lock(lock_path: &Path) -> Result<(), EvidenceError> {
+    let content = std::fs::read_to_string(lock_path).map_err(|_| EvidenceError::PathAlreadyOpen)?;
+    let pid_str = content
+        .strip_prefix("pid=")
+        .and_then(|rest| rest.lines().next())
+        .unwrap_or("");
+    let pid: u32 = pid_str.parse().map_err(|_| EvidenceError::PathAlreadyOpen)?;
+    if pid == 0 {
+        return Err(EvidenceError::PathAlreadyOpen);
+    }
+    if pid_is_alive(pid) {
+        // 持有者存活，拒绝
+        return Err(EvidenceError::PathAlreadyOpen);
+    }
+    // 持有者已不存活，删除陈旧锁
+    std::fs::remove_file(lock_path).map_err(|_| EvidenceError::PathAlreadyOpen)?;
+    Ok(())
 }
 
 impl Drop for FileProcessLock {
@@ -523,6 +574,68 @@ mod tests {
             Err(EvidenceError::PathAlreadyOpen)
         ));
         std::fs::remove_file(lock_path).expect("controlled stale lock cleanup");
+    }
+
+    #[test]
+    fn recovers_stale_lock_with_dead_pid() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("dead-pid.log");
+        // 先创建 store 并写入一条记录
+        {
+            let store = FileEvidenceStore::open(&path).expect("create evidence file");
+            store
+                .append(&record("before-stale-lock"))
+                .expect("append before stale lock");
+        }
+        // 用不存在的 PID 伪造陈旧锁
+        let file = OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .expect("evidence file");
+        let canonical = path.canonicalize().expect("canonical path");
+        let identity = file_identity(&file, &canonical).expect("file identity");
+        let lock_path = FileProcessLock::path_for(&canonical, &identity);
+        // 用一个几乎不可能存在的 PID
+        std::fs::write(&lock_path, b"pid=999999\n").expect("simulate dead pid lock");
+        // 重新打开：应自动恢复陈旧锁，成功打开即证明恢复了
+        let store = FileEvidenceStore::open(&path).expect("recover from stale lock");
+        // 验证原有数据完整
+        let entries = store.entries().expect("entries");
+        assert_eq!(entries.len(), 1, "陈旧锁恢复后原有数据应完整");
+        assert_eq!(entries[0].seq, 1);
+        // 验证 store 可用（可追加新记录）
+        store
+            .append(&record("after-recovery"))
+            .expect("recovered store 应可追加");
+        drop(store);
+    }
+
+    #[test]
+    fn refuses_lock_with_live_pid() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("live-pid.log");
+        {
+            let _store = FileEvidenceStore::open(&path).expect("create evidence file");
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .expect("evidence file");
+        let canonical = path.canonicalize().expect("canonical path");
+        let identity = file_identity(&file, &canonical).expect("file identity");
+        let lock_path = FileProcessLock::path_for(&canonical, &identity);
+        // 用当前进程 PID 伪造锁（确实存活）
+        std::fs::write(
+            &lock_path,
+            format!("pid={}\n", std::process::id()).as_bytes(),
+        )
+        .expect("simulate live pid lock");
+        // 重新打开：持有者存活，应拒绝
+        assert!(matches!(
+            FileEvidenceStore::open(&path),
+            Err(EvidenceError::PathAlreadyOpen)
+        ));
+        std::fs::remove_file(lock_path).expect("cleanup test lock");
     }
 
     #[test]
