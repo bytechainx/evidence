@@ -1,6 +1,6 @@
 [package]
 name = "evidence"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 rust-version = "1.71"
 description = "审计证据追加面：领域无关的结构化 provenance、幂等 receipt 绑定与本地 durable 文件存储"
@@ -46,7 +46,7 @@ tempfile = "3"
 # `version` 必须与 `package.version` 一致：元仓库的 `version-consistency` 检查器把**任何带 `path`
 # 的依赖**解析到工作区内 crate，自依赖也不例外（`path = "."` 解析到本仓），缺 `version` 会报
 # `cross_repo_req … 缺少版本声明`。升版时由 `scripts/bump-patch.mjs` 一并同步（其目标表含被升版本仓自身）。
-evidence = { version = "0.1.1", path = ".", features = ["test-signing-key"] }
+evidence = { version = "0.1.2", path = ".", features = ["test-signing-key"] }
 
 # benches/hot_path.rs 自带 fn main()，必须关掉 libtest harness 才会真正执行。
 [[bench]]
