@@ -43,10 +43,11 @@ tempfile = "3"
 # 故用「自 dev-dependency」在这些测试目标上启用 `test-signing-key`。
 # dev-dependencies 不参与 `cargo build` / 发布产物，生产侧的防泄露门控意图不变。
 #
-# `version` 必须与 `package.version` 一致：元仓库的 `version-consistency` 检查器把**任何带 `path`
-# 的依赖**解析到工作区内 crate，自依赖也不例外（`path = "."` 解析到本仓），缺 `version` 会报
-# `cross_repo_req … 缺少版本声明`。升版时由 `scripts/bump-patch.mjs` 一并同步（其目标表含被升版本仓自身）。
-evidence = { version = "0.1.2", path = ".", features = ["test-signing-key"] }
+# `version-consistency` 检查器已明确**自引用不算跨仓声明**（`scripts/check-version-consistency.mjs`
+# 「自引用不算跨仓声明」段；`specs/features/001-*/data-model.md` V6–V10 注），缺 `version` 不报
+# `cross_repo_req`；而 `version` 在打包时强制去注册表解析，本仓不发布 crates.io，必致
+# `cargo package` 失败。故自引用**不带 `version`**（只留 `path` + `features`），检查器与打包两边均满足。
+evidence = { path = ".", features = ["test-signing-key"] }
 
 # benches/hot_path.rs 自带 fn main()，必须关掉 libtest harness 才会真正执行。
 [[bench]]
