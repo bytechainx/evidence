@@ -2,7 +2,7 @@
 name = "evidence"
 version = "0.1.2"
 edition = "2021"
-rust-version = "1.71"
+rust-version = "1.77"
 description = "审计证据追加面：领域无关的结构化 provenance、幂等 receipt 绑定与本地 durable 文件存储"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/bytechainx/evidence"
