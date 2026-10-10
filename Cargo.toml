@@ -37,6 +37,7 @@ test-signing-key = []
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # 本仓自身的集成测试（tests/tdd_contracts.rs、aidd_boundary.rs、query_sign.rs、sdd_spec.rs）
 # 需要 `TestSigningKey` 与 `ImmutableBinding::sign`，而二者按
 # `cfg(any(test, feature = "test-signing-key"))` 门控——集成测试目标下 lib 不带 `cfg(test)`，
